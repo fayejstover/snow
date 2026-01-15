@@ -125,34 +125,6 @@
     const ATLAS_WIDTH = TEXTURE_SIZE * ROTATION_FRAMES;
     const ATLAS_HEIGHT = TEXTURE_SIZE * SNOWFLAKE_TYPES;
 
-    // UI exclusion zones (in normalized coordinates -1 to 1)
-    const EXCLUSION_ZONES = [];
-
-    function updateExclusionZones() {
-      const w = window.innerWidth;
-      const h = window.innerHeight;
-      
-      EXCLUSION_ZONES.length = 0;
-      
-      // Top-left info area (simple text)
-      EXCLUSION_ZONES.push({
-        x1: -1,
-        y1: 1 - (120 / h) * 2,
-        x2: -1 + (200 / w) * 2,
-        y2: 1,
-        padding: 0.03
-      });
-      
-      // Bottom-right camera + gesture area
-      EXCLUSION_ZONES.push({
-        x1: 1 - (180 / w) * 2,
-        y1: -1,
-        x2: 1,
-        y2: -1 + (280 / h) * 2,
-        padding: 0.05
-      });
-    }
-
     // ============== WEBGL SETUP ==============
     const canvas = document.getElementById('main-canvas');
     const gl = canvas.getContext('webgl2');
@@ -181,7 +153,6 @@
       uiCtx.scale(devicePixelRatio, devicePixelRatio);
       
       aspect = canvas.width / canvas.height;
-      updateExclusionZones();
     }
     resize();
     window.addEventListener('resize', resize);
@@ -915,25 +886,9 @@
     // Size multipliers per type: dendrite, stellar, needle, fern, plate, hexprism
     const TYPE_SIZES = [1.0, 0.85, 0.75, 1.15, 0.9, 0.6];
 
-    function isInExclusionZone(x, y) {
-      for (const zone of EXCLUSION_ZONES) {
-        if (x >= zone.x1 - zone.padding && x <= zone.x2 + zone.padding &&
-            y >= zone.y1 - zone.padding && y <= zone.y2 + zone.padding) {
-          return true;
-        }
-      }
-      return false;
-    }
-
     for (let i = 0; i < PARTICLE_COUNT; i++) {
-      // Generate position, avoiding exclusion zones
-      let px, py;
-      let attempts = 0;
-      do {
-        px = (Math.random() * 2.4 - 1.2) * Math.max(aspect, 1.5);
-        py = Math.random() * 2.4 - 1.2;
-        attempts++;
-      } while (isInExclusionZone(px / aspect, py) && attempts < 10);
+      const px = (Math.random() * 2.4 - 1.2) * Math.max(aspect, 1.5);
+      const py = Math.random() * 2.4 - 1.2;
       
       positions[i * 2] = px;
       positions[i * 2 + 1] = py;
@@ -1071,8 +1026,16 @@
     let drawingPath = [];
     let isDrawing = false;
     let shapeTimeout = null;
+    let stillnessTimeout = null;
     let displayTimeout = null;
     let currentShapeDisplay = null;
+    let lastMoveTime = 0;
+    let isFinalizingShape = false;
+    let detectedCorners = [];
+    let endpointGlow = 0;
+    
+    const STILLNESS_THRESHOLD = 15; // pixels - if moved less than this, consider still
+    const STILLNESS_DURATION = 1500; // 1.5 seconds
     
     const shapeLabel = document.getElementById('shape-label');
 
@@ -1082,22 +1045,93 @@
       const now = Date.now();
       
       let speed = 0;
+      let moved = true;
+      
       if (drawingPath.length > 0) {
         const last = drawingPath[drawingPath.length - 1];
         const dist = Math.sqrt((screenX - last.x) ** 2 + (screenY - last.y) ** 2);
         const dt = now - last.time;
         speed = dt > 0 ? dist / dt : 0;
+        
+        // Check if we've moved significantly
+        moved = dist > STILLNESS_THRESHOLD;
       }
       
       drawingPath.push({ x: screenX, y: screenY, time: now, speed });
       
+      if (moved) {
+        lastMoveTime = now;
+        isFinalizingShape = false;
+        endpointGlow = 0;
+        
+        // Clear any pending stillness timeout
+        if (stillnessTimeout) {
+          clearTimeout(stillnessTimeout);
+          stillnessTimeout = null;
+        }
+      }
+      
+      // Check for stillness - start countdown if not moving much
+      if (!stillnessTimeout && drawingPath.length > 15) {
+        stillnessTimeout = setTimeout(() => {
+          checkStillness();
+        }, 100);
+      }
+      
+      // Clear the old gesture-change based timeout
       if (shapeTimeout) clearTimeout(shapeTimeout);
-      shapeTimeout = setTimeout(analyzeShape, 400);
+      shapeTimeout = setTimeout(analyzeShape, 800);
+    }
+    
+    function checkStillness() {
+      stillnessTimeout = null;
+      
+      if (drawingPath.length < 15 || !isDrawing) return;
+      
+      const now = Date.now();
+      const timeSinceMove = now - lastMoveTime;
+      
+      if (timeSinceMove >= STILLNESS_DURATION) {
+        // Been still long enough - finalize shape
+        isFinalizingShape = true;
+        endpointGlow = 1;
+        
+        // Pre-calculate corners for visual feedback
+        const bounds = getBounds(drawingPath);
+        if (bounds.width >= 40 || bounds.height >= 40) {
+          detectedCorners = findCornersWithTiming(drawingPath, bounds);
+        }
+        
+        // Trigger shape analysis after brief delay for visual feedback
+        setTimeout(() => {
+          analyzeShape();
+        }, 300);
+      } else if (isDrawing) {
+        // Not still long enough yet, check again
+        const remaining = STILLNESS_DURATION - timeSinceMove;
+        
+        // Start showing glow as we approach threshold
+        if (timeSinceMove > STILLNESS_DURATION * 0.3) {
+          isFinalizingShape = true;
+          endpointGlow = (timeSinceMove - STILLNESS_DURATION * 0.3) / (STILLNESS_DURATION * 0.7);
+          
+          // Pre-calculate corners
+          const bounds = getBounds(drawingPath);
+          if (bounds.width >= 40 || bounds.height >= 40) {
+            detectedCorners = findCornersWithTiming(drawingPath, bounds);
+          }
+        }
+        
+        stillnessTimeout = setTimeout(checkStillness, 50);
+      }
     }
 
     function analyzeShape() {
       if (drawingPath.length < 15) {
         drawingPath = [];
+        isFinalizingShape = false;
+        endpointGlow = 0;
+        detectedCorners = [];
         return;
       }
 
@@ -1105,16 +1139,22 @@
       
       if (bounds.width < 40 && bounds.height < 40) {
         drawingPath = [];
+        isFinalizingShape = false;
+        endpointGlow = 0;
+        detectedCorners = [];
         return;
       }
       
       const shape = detectShape(drawingPath, bounds);
       
       if (shape) {
-        showShapeResult(shape, bounds);
+        showShapeResult(shape, bounds, detectedCorners);
       }
       
       drawingPath = [];
+      isFinalizingShape = false;
+      endpointGlow = 0;
+      detectedCorners = [];
     }
 
     function getBounds(points) {
@@ -1280,10 +1320,16 @@
       return Math.abs(dy * point.x - dx * point.y + lineEnd.x * lineStart.y - lineEnd.y * lineStart.x) / d;
     }
 
-    function showShapeResult(shape, bounds) {
+    function showShapeResult(shape, bounds, corners) {
       if (displayTimeout) clearTimeout(displayTimeout);
       
-      currentShapeDisplay = { shape, bounds, startTime: Date.now(), duration: 3000 };
+      currentShapeDisplay = { 
+        shape, 
+        bounds, 
+        corners: corners || [],
+        startTime: Date.now(), 
+        duration: 3000 
+      };
       
       shapeLabel.textContent = `> shape identified: ${shape}`;
       shapeLabel.style.left = `${bounds.minX}px`;
@@ -1300,6 +1346,7 @@
       uiCtx.clearRect(0, 0, window.innerWidth, window.innerHeight);
       
       if (drawingPath.length > 1) {
+        // Draw the path
         uiCtx.beginPath();
         uiCtx.moveTo(drawingPath[0].x, drawingPath[0].y);
         
@@ -1312,8 +1359,60 @@
         uiCtx.lineCap = 'round';
         uiCtx.lineJoin = 'round';
         uiCtx.stroke();
+        
+        // Draw corner indicators while drawing (if we've detected them)
+        if (isFinalizingShape && detectedCorners.length > 0) {
+          for (const corner of detectedCorners) {
+            // Corner glow
+            const gradient = uiCtx.createRadialGradient(
+              corner.x, corner.y, 0,
+              corner.x, corner.y, 12 + endpointGlow * 8
+            );
+            gradient.addColorStop(0, `rgba(13, 61, 185, ${0.8 * endpointGlow})`);
+            gradient.addColorStop(0.5, `rgba(13, 61, 185, ${0.4 * endpointGlow})`);
+            gradient.addColorStop(1, 'rgba(13, 61, 185, 0)');
+            
+            uiCtx.fillStyle = gradient;
+            uiCtx.beginPath();
+            uiCtx.arc(corner.x, corner.y, 12 + endpointGlow * 8, 0, Math.PI * 2);
+            uiCtx.fill();
+            
+            // Corner dot
+            uiCtx.fillStyle = `rgba(255, 255, 255, ${0.9 * endpointGlow})`;
+            uiCtx.beginPath();
+            uiCtx.arc(corner.x, corner.y, 3, 0, Math.PI * 2);
+            uiCtx.fill();
+          }
+        }
+        
+        // Draw endpoint glow when finalizing
+        if (endpointGlow > 0 && drawingPath.length > 0) {
+          const lastPoint = drawingPath[drawingPath.length - 1];
+          
+          // Outer glow
+          const glowSize = 20 + endpointGlow * 15;
+          const gradient = uiCtx.createRadialGradient(
+            lastPoint.x, lastPoint.y, 0,
+            lastPoint.x, lastPoint.y, glowSize
+          );
+          gradient.addColorStop(0, `rgba(100, 150, 255, ${0.9 * endpointGlow})`);
+          gradient.addColorStop(0.3, `rgba(13, 61, 185, ${0.6 * endpointGlow})`);
+          gradient.addColorStop(1, 'rgba(13, 61, 185, 0)');
+          
+          uiCtx.fillStyle = gradient;
+          uiCtx.beginPath();
+          uiCtx.arc(lastPoint.x, lastPoint.y, glowSize, 0, Math.PI * 2);
+          uiCtx.fill();
+          
+          // Inner bright dot
+          uiCtx.fillStyle = `rgba(255, 255, 255, ${endpointGlow})`;
+          uiCtx.beginPath();
+          uiCtx.arc(lastPoint.x, lastPoint.y, 4 + endpointGlow * 2, 0, Math.PI * 2);
+          uiCtx.fill();
+        }
       }
       
+      // Draw shape result display
       if (currentShapeDisplay) {
         const b = currentShapeDisplay.bounds;
         const padding = 15;
@@ -1322,6 +1421,7 @@
         uiCtx.strokeStyle = '#0D3DB9';
         uiCtx.lineWidth = 2;
         
+        // Bounding box corners
         uiCtx.beginPath();
         uiCtx.moveTo(b.minX - padding, b.minY - padding + cornerSize);
         uiCtx.lineTo(b.minX - padding, b.minY - padding);
@@ -1345,6 +1445,25 @@
         uiCtx.lineTo(b.maxX + padding, b.maxY + padding);
         uiCtx.lineTo(b.maxX + padding, b.maxY + padding - cornerSize);
         uiCtx.stroke();
+        
+        // Draw detected corner points on the shape
+        if (currentShapeDisplay.corners && currentShapeDisplay.corners.length > 0) {
+          const elapsed = Date.now() - currentShapeDisplay.startTime;
+          const fadeIn = Math.min(1, elapsed / 300);
+          
+          for (const corner of currentShapeDisplay.corners) {
+            uiCtx.fillStyle = `rgba(13, 61, 185, ${0.8 * fadeIn})`;
+            uiCtx.beginPath();
+            uiCtx.arc(corner.x, corner.y, 5, 0, Math.PI * 2);
+            uiCtx.fill();
+            
+            uiCtx.strokeStyle = `rgba(255, 255, 255, ${0.9 * fadeIn})`;
+            uiCtx.lineWidth = 1.5;
+            uiCtx.beginPath();
+            uiCtx.arc(corner.x, corner.y, 5, 0, Math.PI * 2);
+            uiCtx.stroke();
+          }
+        }
       }
     }
 
@@ -1449,6 +1568,13 @@
         } else if (isDrawing && newGesture !== 'point') {
           isDrawing = false;
           if (shapeTimeout) clearTimeout(shapeTimeout);
+          if (stillnessTimeout) {
+            clearTimeout(stillnessTimeout);
+            stillnessTimeout = null;
+          }
+          isFinalizingShape = false;
+          endpointGlow = 0;
+          detectedCorners = [];
           shapeTimeout = setTimeout(analyzeShape, 300);
         }
         
@@ -1472,6 +1598,13 @@
         if (isDrawing) {
           isDrawing = false;
           if (shapeTimeout) clearTimeout(shapeTimeout);
+          if (stillnessTimeout) {
+            clearTimeout(stillnessTimeout);
+            stillnessTimeout = null;
+          }
+          isFinalizingShape = false;
+          endpointGlow = 0;
+          detectedCorners = [];
           shapeTimeout = setTimeout(analyzeShape, 300);
         }
       }
@@ -1560,24 +1693,6 @@
             const force = Math.pow(1 - dist / 0.15, 2) * 0.015 * parallax;
             velocities[i2] += (dx / dist) * force;
             velocities[i2 + 1] += (dy / dist) * force;
-          }
-        }
-        
-        // Soft repulsion from exclusion zones
-        const normX = positions[i2] / aspect;
-        const normY = positions[i2 + 1];
-        for (const zone of EXCLUSION_ZONES) {
-          if (normX >= zone.x1 - zone.padding * 2 && normX <= zone.x2 + zone.padding * 2 &&
-              normY >= zone.y1 - zone.padding * 2 && normY <= zone.y2 + zone.padding * 2) {
-            const centerX = (zone.x1 + zone.x2) / 2 * aspect;
-            const centerY = (zone.y1 + zone.y2) / 2;
-            const dx = positions[i2] - centerX;
-            const dy = positions[i2 + 1] - centerY;
-            const dist = Math.sqrt(dx * dx + dy * dy);
-            if (dist > 0.01) {
-              velocities[i2] += (dx / dist) * 0.002;
-              velocities[i2 + 1] += (dy / dist) * 0.002;
-            }
           }
         }
         
