@@ -46,6 +46,10 @@
       z-index: 100;
       line-height: 1.8;
       font-family: system-ui, sans-serif;
+      background: rgba(0,0,0,0.7);
+      padding: 12px 16px;
+      border-radius: 8px;
+      backdrop-filter: blur(10px);
     }
     #gesture {
       position: fixed;
@@ -54,12 +58,27 @@
       color: rgba(255,255,255,0.7);
       font-size: 14px;
       z-index: 100;
-      background: rgba(255,255,255,0.1);
+      background: rgba(0,0,0,0.6);
       padding: 8px 14px;
       border-radius: 20px;
       font-family: system-ui, sans-serif;
       min-width: 120px;
       text-align: center;
+      backdrop-filter: blur(10px);
+    }
+    #zoom-indicator {
+      position: fixed;
+      bottom: 60px;
+      right: 170px;
+      color: rgba(255,255,255,0.5);
+      font-size: 11px;
+      z-index: 100;
+      font-family: system-ui, sans-serif;
+      opacity: 0;
+      transition: opacity 0.3s ease;
+    }
+    #zoom-indicator.visible {
+      opacity: 1;
     }
     #loading {
       position: fixed;
@@ -91,10 +110,12 @@
   <div id="info">
     ✋ Open hand — push away<br>
     ✊ Fist — attract<br>
-    👆 Point — draw shapes
+    👆 Point — draw shapes<br>
+    🤏 Pinch — zoom in
   </div>
+  <div id="zoom-indicator">ZOOM: 1.0x</div>
   <div id="gesture">—</div>
-  <div id="shape-label">&gt; shape identified: </div>
+  <div id="shape-label">> shape identified: </div>
   <video id="video" autoplay playsinline></video>
   <canvas id="main-canvas"></canvas>
   <canvas id="ui-canvas"></canvas>
@@ -106,6 +127,39 @@
     // ============== CONFIG ==============
     const PARTICLE_COUNT = 25000;
     const HAND_RADIUS = 0.28;
+    const SNOWFLAKE_TYPES = 6;
+    const ROTATION_FRAMES = 12; // Frames per type for 3D rotation
+    const TEXTURE_SIZE = 64; // Smaller for cleaner look
+    const ATLAS_WIDTH = TEXTURE_SIZE * ROTATION_FRAMES;
+    const ATLAS_HEIGHT = TEXTURE_SIZE * SNOWFLAKE_TYPES;
+
+    // UI exclusion zones (in normalized coordinates -1 to 1)
+    const EXCLUSION_ZONES = [];
+
+    function updateExclusionZones() {
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      
+      EXCLUSION_ZONES.length = 0;
+      
+      // Top-left info box (with padding)
+      EXCLUSION_ZONES.push({
+        x1: -1,
+        y1: 1 - (140 / h) * 2,
+        x2: -1 + (220 / w) * 2,
+        y2: 1,
+        padding: 0.05
+      });
+      
+      // Bottom-right camera + gesture area
+      EXCLUSION_ZONES.push({
+        x1: 1 - (180 / w) * 2,
+        y1: -1,
+        x2: 1,
+        y2: -1 + (280 / h) * 2,
+        padding: 0.05
+      });
+    }
 
     // ============== WEBGL SETUP ==============
     const canvas = document.getElementById('main-canvas');
@@ -135,9 +189,586 @@
       uiCtx.scale(devicePixelRatio, devicePixelRatio);
       
       aspect = canvas.width / canvas.height;
+      updateExclusionZones();
     }
     resize();
     window.addEventListener('resize', resize);
+
+    // ============== 3D SNOWFLAKE TEXTURE GENERATION ==============
+    function createSnowflakeTextures() {
+      const textureCanvas = document.createElement('canvas');
+      textureCanvas.width = ATLAS_WIDTH;
+      textureCanvas.height = ATLAS_HEIGHT;
+      const ctx = textureCanvas.getContext('2d');
+      
+      ctx.fillStyle = 'rgba(0,0,0,0)';
+      ctx.fillRect(0, 0, ATLAS_WIDTH, ATLAS_HEIGHT);
+      
+      // For each snowflake type
+      for (let type = 0; type < SNOWFLAKE_TYPES; type++) {
+        // For each rotation frame
+        for (let frame = 0; frame < ROTATION_FRAMES; frame++) {
+          const offsetX = frame * TEXTURE_SIZE;
+          const offsetY = type * TEXTURE_SIZE;
+          const cx = offsetX + TEXTURE_SIZE / 2;
+          const cy = offsetY + TEXTURE_SIZE / 2;
+          const radius = TEXTURE_SIZE * 0.42;
+          
+          // Calculate 3D rotation angles for this frame
+          const rotProgress = frame / ROTATION_FRAMES;
+          const tiltX = Math.sin(rotProgress * Math.PI * 2) * 0.6; // Tumble around X
+          const tiltY = Math.cos(rotProgress * Math.PI * 2 + 1) * 0.4; // Tumble around Y
+          const rotZ = rotProgress * Math.PI * 2; // Spin around Z
+          
+          ctx.save();
+          ctx.translate(cx, cy);
+          
+          switch(type) {
+            case 0: // Classic dendrite - larger, delicate
+              drawDendrite3D(ctx, radius * 1.1, tiltX, tiltY, rotZ);
+              break;
+            case 1: // Stellar plate
+              drawStellarPlate3D(ctx, radius, tiltX, tiltY, rotZ);
+              break;
+            case 2: // Needle aggregate
+              drawNeedleAggregate3D(ctx, radius * 0.9, tiltX, tiltY, rotZ);
+              break;
+            case 3: // Fernlike stellar - largest
+              drawFernlikeStellar3D(ctx, radius * 1.2, tiltX, tiltY, rotZ);
+              break;
+            case 4: // Plate with extensions
+              drawPlateWithExtensions3D(ctx, radius * 0.95, tiltX, tiltY, rotZ);
+              break;
+            case 5: // Hexagonal prism - smallest, most 3D
+              drawHexagonalPrism3D(ctx, radius * 0.7, tiltX, tiltY, rotZ);
+              break;
+          }
+          
+          ctx.restore();
+        }
+      }
+      
+      return textureCanvas;
+    }
+    
+    // Helper: Apply 3D perspective transform to a point
+    function transform3D(x, y, z, tiltX, tiltY) {
+      // Rotate around X axis
+      let y1 = y * Math.cos(tiltX) - z * Math.sin(tiltX);
+      let z1 = y * Math.sin(tiltX) + z * Math.cos(tiltX);
+      
+      // Rotate around Y axis
+      let x1 = x * Math.cos(tiltY) + z1 * Math.sin(tiltY);
+      let z2 = -x * Math.sin(tiltY) + z1 * Math.cos(tiltY);
+      
+      // Simple perspective
+      const perspective = 1 + z2 * 0.15;
+      
+      return { x: x1 / perspective, y: y1 / perspective, z: z2 };
+    }
+    
+    function drawDendrite3D(ctx, radius, tiltX, tiltY, rotZ) {
+      const arms = 6;
+      const branchLevels = 2;
+      
+      ctx.rotate(rotZ);
+      
+      // Calculate apparent tilt for shading
+      const shadeFactor = 0.5 + Math.cos(tiltX) * 0.3 + Math.cos(tiltY) * 0.2;
+      
+      for (let i = 0; i < arms; i++) {
+        const angle = (i / arms) * Math.PI * 2;
+        ctx.save();
+        ctx.rotate(angle);
+        
+        // Apply foreshortening based on tilt
+        const foreshorten = 0.7 + Math.abs(Math.cos(angle + tiltY)) * 0.3;
+        ctx.scale(foreshorten, 1);
+        
+        const armWidth = radius * 0.04;
+        
+        // Main arm with shading
+        const armShade = 180 + (i % 2) * 30 + shadeFactor * 40;
+        ctx.fillStyle = `rgba(${armShade + 20}, ${armShade + 35}, ${armShade + 50}, 0.85)`;
+        ctx.beginPath();
+        ctx.moveTo(0, armWidth * 0.4);
+        ctx.lineTo(radius * 0.9, armWidth * 0.15);
+        ctx.lineTo(radius * 0.9, -armWidth * 0.15);
+        ctx.lineTo(0, -armWidth * 0.4);
+        ctx.closePath();
+        ctx.fill();
+        
+        // Highlight edge
+        ctx.strokeStyle = `rgba(255, 255, 255, ${0.4 + shadeFactor * 0.3})`;
+        ctx.lineWidth = 0.5;
+        ctx.beginPath();
+        ctx.moveTo(radius * 0.1, -armWidth * 0.35);
+        ctx.lineTo(radius * 0.9, -armWidth * 0.15);
+        ctx.stroke();
+        
+        // Branches
+        for (let level = 1; level <= branchLevels; level++) {
+          const dist = (level / (branchLevels + 1)) * radius * 0.75;
+          const branchLen = radius * 0.28 * (1 - level * 0.25);
+          
+          for (let side = -1; side <= 1; side += 2) {
+            ctx.save();
+            ctx.translate(dist, 0);
+            ctx.rotate(side * Math.PI / 4.5);
+            
+            const branchShade = armShade + side * 15;
+            ctx.fillStyle = `rgba(${branchShade + 30}, ${branchShade + 45}, ${branchShade + 60}, 0.75)`;
+            ctx.beginPath();
+            ctx.moveTo(0, armWidth * 0.25);
+            ctx.lineTo(branchLen, armWidth * 0.08);
+            ctx.lineTo(branchLen, -armWidth * 0.08);
+            ctx.lineTo(0, -armWidth * 0.25);
+            ctx.closePath();
+            ctx.fill();
+            
+            ctx.restore();
+          }
+        }
+        
+        ctx.restore();
+      }
+      
+      // Center
+      const centerGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, radius * 0.1);
+      centerGrad.addColorStop(0, `rgba(255, 255, 255, ${0.7 + shadeFactor * 0.2})`);
+      centerGrad.addColorStop(1, 'rgba(200, 220, 240, 0.5)');
+      ctx.fillStyle = centerGrad;
+      ctx.beginPath();
+      ctx.arc(0, 0, radius * 0.08, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    
+    function drawStellarPlate3D(ctx, radius, tiltX, tiltY, rotZ) {
+      ctx.rotate(rotZ);
+      
+      // Calculate ellipse from tilt
+      const scaleY = 0.4 + Math.abs(Math.cos(tiltX)) * 0.6;
+      const scaleX = 0.4 + Math.abs(Math.cos(tiltY)) * 0.6;
+      
+      ctx.scale(scaleX, scaleY);
+      
+      const shadeFactor = 0.5 + Math.cos(tiltX) * 0.25 + Math.cos(tiltY) * 0.25;
+      const plateRadius = radius * 0.85;
+      
+      // Shadow
+      ctx.fillStyle = `rgba(140, 165, 190, ${0.3 * shadeFactor})`;
+      ctx.beginPath();
+      for (let i = 0; i < 6; i++) {
+        const angle = (i / 6) * Math.PI * 2 - Math.PI / 2;
+        const x = Math.cos(angle) * plateRadius + 1.5;
+        const y = Math.sin(angle) * plateRadius + 1.5;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.closePath();
+      ctx.fill();
+      
+      // Main plate
+      const plateGrad = ctx.createRadialGradient(
+        -plateRadius * 0.2, -plateRadius * 0.2, 0,
+        0, 0, plateRadius
+      );
+      plateGrad.addColorStop(0, `rgba(255, 255, 255, ${0.85 + shadeFactor * 0.1})`);
+      plateGrad.addColorStop(0.5, `rgba(220, 235, 250, ${0.75 + shadeFactor * 0.1})`);
+      plateGrad.addColorStop(1, `rgba(180, 205, 230, ${0.6 + shadeFactor * 0.1})`);
+      
+      ctx.fillStyle = plateGrad;
+      ctx.beginPath();
+      for (let i = 0; i < 6; i++) {
+        const angle = (i / 6) * Math.PI * 2 - Math.PI / 2;
+        const x = Math.cos(angle) * plateRadius;
+        const y = Math.sin(angle) * plateRadius;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.closePath();
+      ctx.fill();
+      
+      // Internal pattern
+      ctx.strokeStyle = `rgba(180, 200, 220, ${0.3 + shadeFactor * 0.2})`;
+      ctx.lineWidth = 0.5;
+      for (let ring = 0.35; ring <= 0.65; ring += 0.3) {
+        ctx.beginPath();
+        for (let i = 0; i < 6; i++) {
+          const angle = (i / 6) * Math.PI * 2 - Math.PI / 2;
+          const x = Math.cos(angle) * plateRadius * ring;
+          const y = Math.sin(angle) * plateRadius * ring;
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.closePath();
+        ctx.stroke();
+      }
+      
+      // Highlight
+      ctx.strokeStyle = `rgba(255, 255, 255, ${0.5 + shadeFactor * 0.3})`;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(0, 0, plateRadius * 0.12, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    
+    function drawNeedleAggregate3D(ctx, radius, tiltX, tiltY, rotZ) {
+      const needles = 7;
+      
+      ctx.rotate(rotZ);
+      
+      const shadeFactor = 0.5 + Math.cos(tiltX) * 0.25 + Math.cos(tiltY) * 0.25;
+      
+      for (let i = 0; i < needles; i++) {
+        const angle = (i / needles) * Math.PI * 2 + i * 0.15;
+        const length = radius * (0.5 + (i % 3) * 0.2);
+        const width = radius * 0.025;
+        
+        // 3D angle offset for each needle
+        const needleTilt = Math.sin(i + tiltX * 2) * 0.3;
+        
+        ctx.save();
+        ctx.rotate(angle);
+        
+        // Foreshorten based on needle's 3D angle
+        const foreshorten = 0.6 + Math.abs(Math.cos(needleTilt)) * 0.4;
+        ctx.scale(1, foreshorten);
+        
+        // Determine light/dark face
+        const facingLight = Math.cos(angle + tiltY) > 0;
+        const baseShade = facingLight ? 220 : 160;
+        
+        // Dark face
+        ctx.fillStyle = `rgba(${baseShade - 40}, ${baseShade - 25}, ${baseShade - 10}, 0.8)`;
+        ctx.beginPath();
+        ctx.moveTo(radius * 0.06, width);
+        ctx.lineTo(length, width * 0.25);
+        ctx.lineTo(length, 0);
+        ctx.lineTo(radius * 0.06, 0);
+        ctx.closePath();
+        ctx.fill();
+        
+        // Light face
+        ctx.fillStyle = `rgba(${baseShade + 20}, ${baseShade + 30}, ${baseShade + 40}, 0.9)`;
+        ctx.beginPath();
+        ctx.moveTo(radius * 0.06, 0);
+        ctx.lineTo(length, 0);
+        ctx.lineTo(length, -width * 0.25);
+        ctx.lineTo(radius * 0.06, -width);
+        ctx.closePath();
+        ctx.fill();
+        
+        // Edge highlight
+        ctx.strokeStyle = `rgba(255, 255, 255, ${0.5 + shadeFactor * 0.3})`;
+        ctx.lineWidth = 0.4;
+        ctx.beginPath();
+        ctx.moveTo(radius * 0.06, -width);
+        ctx.lineTo(length, -width * 0.25);
+        ctx.stroke();
+        
+        ctx.restore();
+      }
+      
+      // Central mass
+      ctx.fillStyle = `rgba(200, 220, 240, ${0.7 + shadeFactor * 0.2})`;
+      ctx.beginPath();
+      ctx.arc(0, 0, radius * 0.08, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    
+    function drawFernlikeStellar3D(ctx, radius, tiltX, tiltY, rotZ) {
+      const arms = 6;
+      
+      ctx.rotate(rotZ);
+      
+      const shadeFactor = 0.5 + Math.cos(tiltX) * 0.25 + Math.cos(tiltY) * 0.25;
+      
+      for (let i = 0; i < arms; i++) {
+        const angle = (i / arms) * Math.PI * 2;
+        ctx.save();
+        ctx.rotate(angle);
+        
+        const foreshorten = 0.65 + Math.abs(Math.cos(angle + tiltY)) * 0.35;
+        ctx.scale(foreshorten, 1);
+        
+        const stemWidth = radius * 0.025;
+        const armShade = 190 + shadeFactor * 50;
+        
+        // Main stem gradient
+        ctx.fillStyle = `rgba(${armShade + 30}, ${armShade + 42}, ${armShade + 55}, 0.85)`;
+        ctx.beginPath();
+        ctx.moveTo(0, stemWidth);
+        ctx.lineTo(radius * 0.88, stemWidth * 0.15);
+        ctx.lineTo(radius * 0.92, 0);
+        ctx.lineTo(radius * 0.88, -stemWidth * 0.15);
+        ctx.lineTo(0, -stemWidth);
+        ctx.closePath();
+        ctx.fill();
+        
+        // Fern branches
+        const branchCount = 10;
+        for (let b = 0; b < branchCount; b++) {
+          const dist = ((b + 1) / (branchCount + 1)) * radius * 0.82;
+          const branchLen = radius * 0.2 * (1 - b / branchCount * 0.4);
+          
+          for (let side = -1; side <= 1; side += 2) {
+            ctx.save();
+            ctx.translate(dist, 0);
+            ctx.rotate(side * Math.PI / 4);
+            
+            const branchShade = armShade + side * 10;
+            ctx.fillStyle = `rgba(${branchShade + 40}, ${branchShade + 52}, ${branchShade + 65}, 0.7)`;
+            ctx.beginPath();
+            ctx.moveTo(0, stemWidth * 0.3);
+            ctx.lineTo(branchLen, stemWidth * 0.08);
+            ctx.lineTo(branchLen, -stemWidth * 0.08);
+            ctx.lineTo(0, -stemWidth * 0.3);
+            ctx.closePath();
+            ctx.fill();
+            
+            ctx.restore();
+          }
+        }
+        
+        // Stem highlight
+        ctx.strokeStyle = `rgba(255, 255, 255, ${0.35 + shadeFactor * 0.25})`;
+        ctx.lineWidth = 0.4;
+        ctx.beginPath();
+        ctx.moveTo(radius * 0.05, -stemWidth * 0.9);
+        ctx.lineTo(radius * 0.88, -stemWidth * 0.15);
+        ctx.stroke();
+        
+        ctx.restore();
+      }
+      
+      // Center highlight
+      const centerGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, radius * 0.08);
+      centerGrad.addColorStop(0, `rgba(255, 255, 255, ${0.8 + shadeFactor * 0.15})`);
+      centerGrad.addColorStop(1, 'rgba(210, 230, 250, 0.5)');
+      ctx.fillStyle = centerGrad;
+      ctx.beginPath();
+      ctx.arc(0, 0, radius * 0.06, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    
+    function drawPlateWithExtensions3D(ctx, radius, tiltX, tiltY, rotZ) {
+      ctx.rotate(rotZ);
+      
+      const scaleY = 0.45 + Math.abs(Math.cos(tiltX)) * 0.55;
+      const scaleX = 0.45 + Math.abs(Math.cos(tiltY)) * 0.55;
+      ctx.scale(scaleX, scaleY);
+      
+      const shadeFactor = 0.5 + Math.cos(tiltX) * 0.25 + Math.cos(tiltY) * 0.25;
+      const plateRadius = radius * 0.45;
+      
+      // Plate shadow
+      ctx.fillStyle = `rgba(140, 165, 190, ${0.25 * shadeFactor})`;
+      ctx.beginPath();
+      ctx.arc(2, 2, plateRadius, 0, Math.PI * 2);
+      ctx.fill();
+      
+      // Main plate
+      const plateGrad = ctx.createRadialGradient(
+        -plateRadius * 0.25, -plateRadius * 0.25, 0,
+        0, 0, plateRadius
+      );
+      plateGrad.addColorStop(0, `rgba(255, 255, 255, ${0.9 + shadeFactor * 0.08})`);
+      plateGrad.addColorStop(0.6, `rgba(225, 240, 255, ${0.8 + shadeFactor * 0.08})`);
+      plateGrad.addColorStop(1, `rgba(190, 215, 240, ${0.65 + shadeFactor * 0.1})`);
+      
+      ctx.fillStyle = plateGrad;
+      ctx.beginPath();
+      ctx.arc(0, 0, plateRadius, 0, Math.PI * 2);
+      ctx.fill();
+      
+      // Extensions
+      const extensions = 6;
+      for (let i = 0; i < extensions; i++) {
+        const angle = (i / extensions) * Math.PI * 2 - Math.PI / 2;
+        ctx.save();
+        ctx.rotate(angle);
+        
+        const extLen = radius * 0.45;
+        const extWidth = radius * 0.04;
+        const extShade = 180 + shadeFactor * 60 + (Math.cos(angle + tiltY) > 0 ? 20 : 0);
+        
+        ctx.fillStyle = `rgba(${extShade + 20}, ${extShade + 35}, ${extShade + 50}, 0.8)`;
+        ctx.beginPath();
+        ctx.moveTo(plateRadius * 0.8, extWidth);
+        ctx.lineTo(plateRadius + extLen, extWidth * 0.25);
+        ctx.lineTo(plateRadius + extLen, -extWidth * 0.25);
+        ctx.lineTo(plateRadius * 0.8, -extWidth);
+        ctx.closePath();
+        ctx.fill();
+        
+        // Highlight
+        ctx.strokeStyle = `rgba(255, 255, 255, ${0.4 + shadeFactor * 0.25})`;
+        ctx.lineWidth = 0.4;
+        ctx.beginPath();
+        ctx.moveTo(plateRadius * 0.8, -extWidth);
+        ctx.lineTo(plateRadius + extLen, -extWidth * 0.25);
+        ctx.stroke();
+        
+        ctx.restore();
+      }
+      
+      // Plate edge highlight
+      ctx.strokeStyle = `rgba(255, 255, 255, ${0.5 + shadeFactor * 0.3})`;
+      ctx.lineWidth = 0.8;
+      ctx.beginPath();
+      ctx.arc(0, 0, plateRadius, -Math.PI * 0.7, Math.PI * 0.3);
+      ctx.stroke();
+    }
+    
+    function drawHexagonalPrism3D(ctx, radius, tiltX, tiltY, rotZ) {
+      // This one gets the most dramatic 3D rotation
+      const size = radius * 0.65;
+      const depth = radius * 0.25;
+      
+      ctx.rotate(rotZ * 0.3); // Slower Z rotation
+      
+      // Calculate 3D vertices
+      const topVerts = [];
+      const botVerts = [];
+      
+      for (let i = 0; i < 6; i++) {
+        const angle = (i / 6) * Math.PI * 2 - Math.PI / 2;
+        const x = Math.cos(angle) * size;
+        const y = Math.sin(angle) * size;
+        
+        // Transform to 3D
+        const top3D = transform3D(x, y, -depth, tiltX, tiltY);
+        const bot3D = transform3D(x, y, depth, tiltX, tiltY);
+        
+        topVerts.push({ x: top3D.x, y: top3D.y, z: top3D.z });
+        botVerts.push({ x: bot3D.x, y: bot3D.y, z: bot3D.z });
+      }
+      
+      // Sort faces by Z for proper rendering order
+      const faces = [];
+      
+      // Add side faces
+      for (let i = 0; i < 6; i++) {
+        const next = (i + 1) % 6;
+        const avgZ = (topVerts[i].z + topVerts[next].z + botVerts[i].z + botVerts[next].z) / 4;
+        
+        // Calculate face normal for shading
+        const midAngle = ((i + 0.5) / 6) * Math.PI * 2 - Math.PI / 2;
+        const normalX = Math.cos(midAngle);
+        const normalY = Math.sin(midAngle);
+        const transformedNormal = transform3D(normalX, normalY, 0, tiltX, tiltY);
+        const facing = -transformedNormal.z; // How much face points toward viewer
+        
+        if (facing > -0.2) { // Only draw visible faces
+          faces.push({
+            type: 'side',
+            verts: [topVerts[i], topVerts[next], botVerts[next], botVerts[i]],
+            z: avgZ,
+            facing: facing,
+            index: i
+          });
+        }
+      }
+      
+      // Add top face
+      const topAvgZ = topVerts.reduce((sum, v) => sum + v.z, 0) / 6;
+      const topNormal = transform3D(0, 0, -1, tiltX, tiltY);
+      if (topNormal.z < 0.1) {
+        faces.push({
+          type: 'top',
+          verts: topVerts,
+          z: topAvgZ - 0.1,
+          facing: -topNormal.z
+        });
+      }
+      
+      // Add bottom face
+      const botAvgZ = botVerts.reduce((sum, v) => sum + v.z, 0) / 6;
+      const botNormal = transform3D(0, 0, 1, tiltX, tiltY);
+      if (botNormal.z < 0.1) {
+        faces.push({
+          type: 'bottom',
+          verts: botVerts,
+          z: botAvgZ + 0.1,
+          facing: -botNormal.z
+        });
+      }
+      
+      // Sort by Z (back to front)
+      faces.sort((a, b) => b.z - a.z);
+      
+      // Draw faces
+      for (const face of faces) {
+        const brightness = 0.5 + face.facing * 0.5;
+        const baseColor = Math.floor(140 + brightness * 100);
+        
+        if (face.type === 'side') {
+          // Side faces with gradient based on orientation
+          const shade = baseColor + face.index * 5;
+          ctx.fillStyle = `rgba(${shade}, ${shade + 15}, ${shade + 30}, 0.9)`;
+          ctx.beginPath();
+          ctx.moveTo(face.verts[0].x, face.verts[0].y);
+          for (let i = 1; i < 4; i++) {
+            ctx.lineTo(face.verts[i].x, face.verts[i].y);
+          }
+          ctx.closePath();
+          ctx.fill();
+          
+          // Edge highlights
+          if (face.facing > 0.3) {
+            ctx.strokeStyle = `rgba(255, 255, 255, ${0.3 + face.facing * 0.4})`;
+            ctx.lineWidth = 0.6;
+            ctx.beginPath();
+            ctx.moveTo(face.verts[0].x, face.verts[0].y);
+            ctx.lineTo(face.verts[1].x, face.verts[1].y);
+            ctx.stroke();
+          }
+        } else if (face.type === 'top') {
+          // Top face - brightest
+          const topGrad = ctx.createLinearGradient(-size, -size, size, size);
+          topGrad.addColorStop(0, `rgba(255, 255, 255, ${0.85 + brightness * 0.1})`);
+          topGrad.addColorStop(1, `rgba(${baseColor + 40}, ${baseColor + 55}, ${baseColor + 70}, ${0.75 + brightness * 0.1})`);
+          
+          ctx.fillStyle = topGrad;
+          ctx.beginPath();
+          ctx.moveTo(face.verts[0].x, face.verts[0].y);
+          for (let i = 1; i < 6; i++) {
+            ctx.lineTo(face.verts[i].x, face.verts[i].y);
+          }
+          ctx.closePath();
+          ctx.fill();
+          
+          // Top highlight edge
+          ctx.strokeStyle = `rgba(255, 255, 255, ${0.6 + brightness * 0.3})`;
+          ctx.lineWidth = 0.8;
+          ctx.beginPath();
+          ctx.moveTo(face.verts[5].x, face.verts[5].y);
+          ctx.lineTo(face.verts[0].x, face.verts[0].y);
+          ctx.lineTo(face.verts[1].x, face.verts[1].y);
+          ctx.stroke();
+        } else {
+          // Bottom face - darker
+          ctx.fillStyle = `rgba(${baseColor - 20}, ${baseColor - 5}, ${baseColor + 10}, 0.7)`;
+          ctx.beginPath();
+          ctx.moveTo(face.verts[0].x, face.verts[0].y);
+          for (let i = 1; i < 6; i++) {
+            ctx.lineTo(face.verts[i].x, face.verts[i].y);
+          }
+          ctx.closePath();
+          ctx.fill();
+        }
+      }
+    }
+
+    // Create texture atlas
+    const textureCanvas = createSnowflakeTextures();
+    const texture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, textureCanvas);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.generateMipmap(gl.TEXTURE_2D);
 
     // ============== SHADERS ==============
     const vertexShader = `#version 300 es
@@ -145,25 +776,41 @@
     in float a_depth;
     in float a_size;
     in float a_alpha;
+    in float a_type;
+    in float a_rotationFrame;
+    in float a_rotationSpeed;
     
     uniform vec2 u_resolution;
     uniform float u_time;
+    uniform float u_zoom;
+    uniform vec2 u_zoomCenter;
     
     out float v_alpha;
     out float v_depth;
+    out float v_type;
+    out float v_rotationFrame;
     
     void main() {
       v_alpha = a_alpha;
       v_depth = a_depth;
+      v_type = a_type;
+      
+      // Animate rotation frame over time
+      float animatedFrame = a_rotationFrame + u_time * a_rotationSpeed;
+      v_rotationFrame = mod(animatedFrame, ${ROTATION_FRAMES}.0);
       
       float aspect = u_resolution.x / u_resolution.y;
       vec2 pos = a_position;
+      
+      // Apply zoom
+      pos = (pos - u_zoomCenter) * u_zoom + u_zoomCenter;
       pos.x /= aspect;
       
       gl_Position = vec4(pos, 0.0, 1.0);
       
       float depthScale = 0.5 + a_depth * 0.8;
-      gl_PointSize = a_size * depthScale * min(u_resolution.x, u_resolution.y) / 900.0;
+      float baseSize = a_size * depthScale * min(u_resolution.x, u_resolution.y) / 1000.0;
+      gl_PointSize = baseSize * u_zoom;
     }
     `;
 
@@ -172,24 +819,49 @@
     
     in float v_alpha;
     in float v_depth;
+    in float v_type;
+    in float v_rotationFrame;
+    
+    uniform sampler2D u_texture;
+    uniform float u_zoom;
     
     out vec4 fragColor;
     
     void main() {
-      vec2 c = gl_PointCoord - 0.5;
-      float d = length(c);
-      float a = smoothstep(0.5, 0.0, d);
-      a = pow(a, 1.3);
-      a += exp(-d * 6.0) * 0.4;
-      a *= v_alpha * (0.4 + v_depth * 0.6);
+      vec2 uv = gl_PointCoord;
       
-      vec3 col = mix(
-        vec3(0.7, 0.8, 1.0),
-        vec3(1.0, 1.0, 1.0),
-        v_depth
-      );
+      // Clamp edges
+      if (uv.x < 0.02 || uv.x > 0.98 || uv.y < 0.02 || uv.y > 0.98) {
+        discard;
+      }
       
-      fragColor = vec4(col, a * 0.75);
+      // Sample from texture atlas with rotation frame interpolation
+      float frame = floor(v_rotationFrame);
+      float frameNext = mod(frame + 1.0, ${ROTATION_FRAMES}.0);
+      float frameLerp = fract(v_rotationFrame);
+      
+      float typeIndex = floor(v_type);
+      
+      // UV coordinates for current and next frame
+      float atlasU1 = (frame + uv.x) / ${ROTATION_FRAMES}.0;
+      float atlasU2 = (frameNext + uv.x) / ${ROTATION_FRAMES}.0;
+      float atlasV = (typeIndex + uv.y) / ${SNOWFLAKE_TYPES}.0;
+      
+      vec4 texColor1 = texture(u_texture, vec2(atlasU1, atlasV));
+      vec4 texColor2 = texture(u_texture, vec2(atlasU2, atlasV));
+      vec4 texColor = mix(texColor1, texColor2, frameLerp);
+      
+      // Depth-based atmospheric effect
+      float atmosphere = 0.6 + v_depth * 0.4;
+      vec3 color = texColor.rgb * atmosphere;
+      
+      // Blue tint for distant particles
+      color = mix(color, vec3(0.7, 0.8, 1.0) * color, (1.0 - v_depth) * 0.25);
+      
+      float alpha = texColor.a * v_alpha * (0.5 + v_depth * 0.5);
+      alpha *= mix(1.0, 1.2, clamp((u_zoom - 1.0) / 3.0, 0.0, 1.0));
+      
+      fragColor = vec4(color, alpha);
     }
     `;
 
@@ -219,11 +891,36 @@
     const depths = new Float32Array(PARTICLE_COUNT);
     const sizes = new Float32Array(PARTICLE_COUNT);
     const alphas = new Float32Array(PARTICLE_COUNT);
+    const types = new Float32Array(PARTICLE_COUNT);
+    const rotationFrames = new Float32Array(PARTICLE_COUNT);
+    const rotationSpeeds = new Float32Array(PARTICLE_COUNT);
     const basePositions = new Float32Array(PARTICLE_COUNT * 2);
 
+    // Size multipliers per type: dendrite, stellar, needle, fern, plate, hexprism
+    const TYPE_SIZES = [1.0, 0.85, 0.75, 1.15, 0.9, 0.6];
+
+    function isInExclusionZone(x, y) {
+      for (const zone of EXCLUSION_ZONES) {
+        if (x >= zone.x1 - zone.padding && x <= zone.x2 + zone.padding &&
+            y >= zone.y1 - zone.padding && y <= zone.y2 + zone.padding) {
+          return true;
+        }
+      }
+      return false;
+    }
+
     for (let i = 0; i < PARTICLE_COUNT; i++) {
-      positions[i * 2] = (Math.random() * 2.4 - 1.2) * Math.max(aspect, 1.5);
-      positions[i * 2 + 1] = Math.random() * 2.4 - 1.2;
+      // Generate position, avoiding exclusion zones
+      let px, py;
+      let attempts = 0;
+      do {
+        px = (Math.random() * 2.4 - 1.2) * Math.max(aspect, 1.5);
+        py = Math.random() * 2.4 - 1.2;
+        attempts++;
+      } while (isInExclusionZone(px / aspect, py) && attempts < 10);
+      
+      positions[i * 2] = px;
+      positions[i * 2 + 1] = py;
       
       basePositions[i * 2] = positions[i * 2];
       basePositions[i * 2 + 1] = positions[i * 2 + 1];
@@ -232,14 +929,30 @@
       velocities[i * 2 + 1] = 0;
       
       depths[i] = Math.pow(Math.random(), 0.7);
-      sizes[i] = 2 + Math.random() * 5;
-      alphas[i] = 0.3 + Math.random() * 0.7;
+      
+      const type = Math.floor(Math.random() * SNOWFLAKE_TYPES);
+      types[i] = type;
+      
+      // Base size adjusted by type
+      const baseSize = 6 + Math.random() * 10;
+      sizes[i] = baseSize * TYPE_SIZES[type];
+      
+      alphas[i] = 0.5 + Math.random() * 0.5;
+      
+      // Random starting rotation frame
+      rotationFrames[i] = Math.random() * ROTATION_FRAMES;
+      
+      // Random rotation speed and direction
+      rotationSpeeds[i] = (Math.random() - 0.5) * 2.0; // -1 to 1
     }
 
     const posBuffer = gl.createBuffer();
     const depthBuffer = gl.createBuffer();
     const sizeBuffer = gl.createBuffer();
     const alphaBuffer = gl.createBuffer();
+    const typeBuffer = gl.createBuffer();
+    const rotFrameBuffer = gl.createBuffer();
+    const rotSpeedBuffer = gl.createBuffer();
 
     const vao = gl.createVertexArray();
     gl.bindVertexArray(vao);
@@ -268,10 +981,37 @@
     gl.enableVertexAttribArray(alphaLoc);
     gl.vertexAttribPointer(alphaLoc, 1, gl.FLOAT, false, 0, 0);
 
+    gl.bindBuffer(gl.ARRAY_BUFFER, typeBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, types, gl.STATIC_DRAW);
+    const typeLoc = gl.getAttribLocation(program, 'a_type');
+    gl.enableVertexAttribArray(typeLoc);
+    gl.vertexAttribPointer(typeLoc, 1, gl.FLOAT, false, 0, 0);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, rotFrameBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, rotationFrames, gl.STATIC_DRAW);
+    const rotFrameLoc = gl.getAttribLocation(program, 'a_rotationFrame');
+    gl.enableVertexAttribArray(rotFrameLoc);
+    gl.vertexAttribPointer(rotFrameLoc, 1, gl.FLOAT, false, 0, 0);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, rotSpeedBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, rotationSpeeds, gl.STATIC_DRAW);
+    const rotSpeedLoc = gl.getAttribLocation(program, 'a_rotationSpeed');
+    gl.enableVertexAttribArray(rotSpeedLoc);
+    gl.vertexAttribPointer(rotSpeedLoc, 1, gl.FLOAT, false, 0, 0);
+
     const resLoc = gl.getUniformLocation(program, 'u_resolution');
     const timeLoc = gl.getUniformLocation(program, 'u_time');
+    const zoomLoc = gl.getUniformLocation(program, 'u_zoom');
+    const zoomCenterLoc = gl.getUniformLocation(program, 'u_zoomCenter');
+    const texLoc = gl.getUniformLocation(program, 'u_texture');
 
-    // ============== v4 better shape recognition ==============
+    // ============== ZOOM STATE ==============
+    let currentZoom = 1.0;
+    let targetZoom = 1.0;
+    let zoomCenter = { x: 0, y: 0 };
+    const zoomIndicator = document.getElementById('zoom-indicator');
+
+    // ============== SHAPE RECOGNITION ==============
     let drawingPath = [];
     let isDrawing = false;
     let shapeTimeout = null;
@@ -285,7 +1025,6 @@
       const screenY = (1 - y) / 2 * window.innerHeight;
       const now = Date.now();
       
-      // Calculate speed from last point
       let speed = 0;
       if (drawingPath.length > 0) {
         const last = drawingPath[drawingPath.length - 1];
@@ -308,7 +1047,6 @@
 
       const bounds = getBounds(drawingPath);
       
-      // Minimum size threshold
       if (bounds.width < 40 && bounds.height < 40) {
         drawingPath = [];
         return;
@@ -338,7 +1076,6 @@
     }
 
     function detectShape(path, bounds) {
-      // Check if closed
       const startEnd = Math.sqrt(
         (path[0].x - path[path.length - 1].x) ** 2 +
         (path[0].y - path[path.length - 1].y) ** 2
@@ -346,10 +1083,8 @@
       const diagonal = Math.sqrt(bounds.width ** 2 + bounds.height ** 2);
       const isClosed = startEnd < diagonal * 0.25;
       
-      // Find corners using both angle AND timing
       const corners = findCornersWithTiming(path, bounds);
       
-      // Calculate circularity (how round is it?)
       const centerX = (bounds.minX + bounds.maxX) / 2;
       const centerY = (bounds.minY + bounds.maxY) / 2;
       const avgRadius = (bounds.width + bounds.height) / 4;
@@ -361,88 +1096,48 @@
       }
       radiusVariance = Math.sqrt(radiusVariance / path.length) / avgRadius;
       
-      // Lower variance = more circular
       const isCircular = radiusVariance < 0.15;
-      
-      // how "straight" the edges 
       const edgeStraightness = corners.length >= 3 ? calculateEdgeStraightness(path, corners) : 0;
-      
       const aspectRatio = bounds.width / bounds.height;
       
-      console.log('Analysis:', { 
-        corners: corners.length, 
-        isClosed, 
-        radiusVariance: radiusVariance.toFixed(3),
-        isCircular,
-        edgeStraightness: edgeStraightness.toFixed(3),
-        aspectRatio: aspectRatio.toFixed(2)
-      });
-      
       if (!isClosed) {
-        if (corners.length === 0) {
-          return 'line';
-        } else if (corners.length === 1) {
-          return 'angle';
-        } else if (corners.length === 2) {
-          return 'zigzag';
-        } else {
-          return 'wave';
-        }
+        if (corners.length === 0) return 'line';
+        else if (corners.length === 1) return 'angle';
+        else if (corners.length === 2) return 'zigzag';
+        else return 'wave';
       }
       
-      // Closed shapes
-      // If very circular and few distinct corners, it's a circle/oval
       if (isCircular && corners.length < 3) {
-        if (aspectRatio > 0.8 && aspectRatio < 1.25) {
-          return 'circle';
-        } else {
-          return 'oval';
-        }
+        return aspectRatio > 0.8 && aspectRatio < 1.25 ? 'circle' : 'oval';
       }
       
-      // Has corners - it's a polygon
-      // Use edge straightness to confirm it's not a wobbly circle
       if (edgeStraightness > 0.85 || corners.length >= 3) {
-        if (corners.length === 3) {
-          return 'triangle';
-        } else if (corners.length === 4) {
-          if (aspectRatio > 0.8 && aspectRatio < 1.25) {
-            return 'square';
-          } else {
-            return 'rectangle';
-          }
-        } else if (corners.length === 5) {
-          return 'pentagon';
-        } else if (corners.length === 6) {
-          return 'hexagon';
-        } else if (corners.length > 6) {
-          // Many corners but not circular = star or complex polygon
-          if (isCircular) {
-            return aspectRatio > 0.8 && aspectRatio < 1.25 ? 'circle' : 'oval';
-          }
-          return 'polygon';
+        if (corners.length === 3) return 'triangle';
+        else if (corners.length === 4) {
+          return aspectRatio > 0.8 && aspectRatio < 1.25 ? 'square' : 'rectangle';
+        }
+        else if (corners.length === 5) return 'pentagon';
+        else if (corners.length === 6) return 'hexagon';
+        else if (corners.length > 6) {
+          return isCircular ? (aspectRatio > 0.8 && aspectRatio < 1.25 ? 'circle' : 'oval') : 'polygon';
         }
       }
       
-      // ambiguous
-      if (aspectRatio > 0.8 && aspectRatio < 1.25) {
-        return corners.length >= 3 ? 'polygon' : 'circle';
-      }
-      return corners.length >= 3 ? 'polygon' : 'oval';
+      return aspectRatio > 0.8 && aspectRatio < 1.25 ? 
+        (corners.length >= 3 ? 'polygon' : 'circle') : 
+        (corners.length >= 3 ? 'polygon' : 'oval');
     }
 
     function findCornersWithTiming(path, bounds) {
       const corners = [];
       const diagonal = Math.sqrt(bounds.width ** 2 + bounds.height ** 2);
-      const minCornerDist = diagonal * 0.1; // Corners must be at least 10% of shape size apart
+      const minCornerDist = diagonal * 0.1;
       
-      // average speed
       const speeds = path.map(p => p.speed).filter(s => s > 0);
       const avgSpeed = speeds.length > 0 ? speeds.reduce((a, b) => a + b, 0) / speeds.length : 1;
       
-      const angleThreshold = 0.35; // ~20 degrees - more sensitive
-      const speedSlowdownThreshold = 0.5; // Point is slow if speed < 50% of average
-      
+      const angleThreshold = 0.35;
+      const speedSlowdownThreshold = 0.5;
       const windowSize = Math.max(3, Math.floor(path.length / 25));
       
       for (let i = windowSize; i < path.length - windowSize; i++) {
@@ -456,7 +1151,6 @@
         let angleDiff = Math.abs(angle2 - angle1);
         if (angleDiff > Math.PI) angleDiff = 2 * Math.PI - angleDiff;
         
-        // Speed 
         let localSpeed = 0;
         let speedCount = 0;
         for (let j = Math.max(0, i - 2); j <= Math.min(path.length - 1, i + 2); j++) {
@@ -468,39 +1162,21 @@
         localSpeed = speedCount > 0 ? localSpeed / speedCount : avgSpeed;
         
         const isSlowPoint = localSpeed < avgSpeed * speedSlowdownThreshold;
-        
-        // Corner detection: angle change OR angle + slow speed
-        const isCorner = angleDiff > angleThreshold * 1.5 || 
-                        (angleDiff > angleThreshold && isSlowPoint);
+        const isCorner = angleDiff > angleThreshold * 1.5 || (angleDiff > angleThreshold && isSlowPoint);
         
         if (isCorner) {
-          // if we already have a corner nearby
           const tooClose = corners.some(c => 
             Math.sqrt((c.x - curr.x) ** 2 + (c.y - curr.y) ** 2) < minCornerDist
           );
           
           if (!tooClose) {
-            corners.push({ 
-              x: curr.x, 
-              y: curr.y, 
-              angle: angleDiff,
-              speed: localSpeed,
-              index: i
-            });
+            corners.push({ x: curr.x, y: curr.y, angle: angleDiff, speed: localSpeed, index: i });
           }
         }
       }
       
-      // Sort corners by angle strength and keep the most prominent ones
       corners.sort((a, b) => b.angle - a.angle);
-      
-      // 3-8 corners normal tri-oct
-      // Remove weak corners if too many
-      const maxCorners = 8;
-      if (corners.length > maxCorners) {
-        corners.length = maxCorners;
-      }
-      
+      if (corners.length > 8) corners.length = 8;
       corners.sort((a, b) => a.index - b.index);
       
       return corners;
@@ -521,7 +1197,6 @@
         
         if (endIdx - startIdx < 3) continue;
         
-        //  how straight the line is between corners
         let maxDeviation = 0;
         const edgeLength = Math.sqrt((c2.x - c1.x) ** 2 + (c2.y - c1.y) ** 2);
         
@@ -550,16 +1225,9 @@
     }
 
     function showShapeResult(shape, bounds) {
-      if (displayTimeout) {
-        clearTimeout(displayTimeout);
-      }
+      if (displayTimeout) clearTimeout(displayTimeout);
       
-      currentShapeDisplay = {
-        shape,
-        bounds,
-        startTime: Date.now(),
-        duration: 3000
-      };
+      currentShapeDisplay = { shape, bounds, startTime: Date.now(), duration: 3000 };
       
       shapeLabel.textContent = `> shape identified: ${shape}`;
       shapeLabel.style.left = `${bounds.minX}px`;
@@ -575,7 +1243,6 @@
     function drawUI() {
       uiCtx.clearRect(0, 0, window.innerWidth, window.innerHeight);
       
-      // Draw current path
       if (drawingPath.length > 1) {
         uiCtx.beginPath();
         uiCtx.moveTo(drawingPath[0].x, drawingPath[0].y);
@@ -599,28 +1266,24 @@
         uiCtx.strokeStyle = '#0D3DB9';
         uiCtx.lineWidth = 2;
         
-        // Top-left corner
         uiCtx.beginPath();
         uiCtx.moveTo(b.minX - padding, b.minY - padding + cornerSize);
         uiCtx.lineTo(b.minX - padding, b.minY - padding);
         uiCtx.lineTo(b.minX - padding + cornerSize, b.minY - padding);
         uiCtx.stroke();
         
-        // Top-right corner
         uiCtx.beginPath();
         uiCtx.moveTo(b.maxX + padding - cornerSize, b.minY - padding);
         uiCtx.lineTo(b.maxX + padding, b.minY - padding);
         uiCtx.lineTo(b.maxX + padding, b.minY - padding + cornerSize);
         uiCtx.stroke();
         
-        // Bottom-left corner
         uiCtx.beginPath();
         uiCtx.moveTo(b.minX - padding, b.maxY + padding - cornerSize);
         uiCtx.lineTo(b.minX - padding, b.maxY + padding);
         uiCtx.lineTo(b.minX - padding + cornerSize, b.maxY + padding);
         uiCtx.stroke();
         
-        // Bottom-right corner
         uiCtx.beginPath();
         uiCtx.moveTo(b.maxX + padding - cornerSize, b.maxY + padding);
         uiCtx.lineTo(b.maxX + padding, b.maxY + padding);
@@ -635,6 +1298,7 @@
     let lastHand = null;
     let gesture = 'none';
     let fingerTip = null;
+    let pinchAmount = 0;
     
     const gestureEl = document.getElementById('gesture');
 
@@ -650,6 +1314,20 @@
       }
       
       const extendedCount = extended.filter(e => e).length;
+      
+      const thumbTip = landmarks[4];
+      const indexTip = landmarks[8];
+      const pinchDist = Math.sqrt(
+        (thumbTip.x - indexTip.x) ** 2 + 
+        (thumbTip.y - indexTip.y) ** 2
+      );
+      
+      if (pinchDist < 0.08) {
+        pinchAmount = 1 - (pinchDist / 0.08);
+        return 'pinch';
+      }
+      
+      pinchAmount = 0;
       
       if (extendedCount >= 4) {
         return 'open';
@@ -702,6 +1380,13 @@
         
         const newGesture = detectGesture(landmarks);
         
+        if (newGesture === 'pinch') {
+          targetZoom = 1 + pinchAmount * 3.5;
+          zoomCenter = { x: fingerTip.x, y: fingerTip.y };
+        } else {
+          targetZoom = 1.0;
+        }
+        
         if (newGesture === 'point') {
           addPoint(fingerTip.x, fingerTip.y);
           isDrawing = true;
@@ -716,7 +1401,8 @@
         const gestureNames = {
           'open': '✋ Push',
           'fist': '✊ Attract',
-          'point': '👆 Drawing...'
+          'point': '👆 Drawing...',
+          'pinch': '🤏 Zoom'
         };
         gestureEl.textContent = gestureNames[gesture] || '—';
         
@@ -725,6 +1411,7 @@
         fingerTip = null;
         gesture = 'none';
         gestureEl.textContent = '—';
+        targetZoom = 1.0;
         
         if (isDrawing) {
           isDrawing = false;
@@ -756,9 +1443,9 @@
     }
     startCamera();
 
-    //  ANIMATION 
+    // ============== ANIMATION ==============
     gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
     let time = 0;
 
@@ -767,12 +1454,21 @@
       
       time += 0.016;
       
+      currentZoom += (targetZoom - currentZoom) * 0.08;
+      
+      if (currentZoom > 1.05) {
+        zoomIndicator.textContent = `ZOOM: ${currentZoom.toFixed(1)}x`;
+        zoomIndicator.classList.add('visible');
+      } else {
+        zoomIndicator.classList.remove('visible');
+      }
+      
       for (let i = 0; i < PARTICLE_COUNT; i++) {
         const i2 = i * 2;
         const depth = depths[i];
         const parallax = 0.3 + depth * 0.7;
         
-        if (handPos && gesture !== 'point') {
+        if (handPos && gesture !== 'point' && gesture !== 'pinch') {
           const dx = positions[i2] - handPos.x;
           const dy = positions[i2 + 1] - handPos.y;
           const dist = Math.sqrt(dx * dx + dy * dy);
@@ -811,12 +1507,30 @@
           }
         }
         
+        // Soft repulsion from exclusion zones
+        const normX = positions[i2] / aspect;
+        const normY = positions[i2 + 1];
+        for (const zone of EXCLUSION_ZONES) {
+          if (normX >= zone.x1 - zone.padding * 2 && normX <= zone.x2 + zone.padding * 2 &&
+              normY >= zone.y1 - zone.padding * 2 && normY <= zone.y2 + zone.padding * 2) {
+            const centerX = (zone.x1 + zone.x2) / 2 * aspect;
+            const centerY = (zone.y1 + zone.y2) / 2;
+            const dx = positions[i2] - centerX;
+            const dy = positions[i2 + 1] - centerY;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist > 0.01) {
+              velocities[i2] += (dx / dist) * 0.002;
+              velocities[i2 + 1] += (dy / dist) * 0.002;
+            }
+          }
+        }
+        
         const driftSpeed = 0.0003 * (1 - depth * 0.5);
         velocities[i2] += Math.sin(time * 0.5 + i * 0.01) * driftSpeed;
         velocities[i2 + 1] += Math.cos(time * 0.3 + i * 0.01) * driftSpeed;
         
-        velocities[i2] += (basePositions[i2] - positions[i2]) * 0.001 * parallax;
-        velocities[i2 + 1] += (basePositions[i2 + 1] - positions[i2 + 1]) * 0.001 * parallax;
+        velocities[i2] += (basePositions[i2] - positions[i2]) * 0.0008 * parallax;
+        velocities[i2 + 1] += (basePositions[i2 + 1] - positions[i2 + 1]) * 0.0008 * parallax;
         
         velocities[i2] *= 0.97;
         velocities[i2 + 1] *= 0.97;
@@ -830,6 +1544,9 @@
       
       gl.uniform2f(resLoc, canvas.width, canvas.height);
       gl.uniform1f(timeLoc, time);
+      gl.uniform1f(zoomLoc, currentZoom);
+      gl.uniform2f(zoomCenterLoc, zoomCenter.x, zoomCenter.y);
+      gl.uniform1i(texLoc, 0);
       
       gl.clearColor(0, 0, 0, 1);
       gl.clear(gl.COLOR_BUFFER_BIT);
